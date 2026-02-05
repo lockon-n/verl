@@ -4,6 +4,6 @@ cd verl
 git checkout main
 
 # step 2, run something
-python playground/test.py
+python jl_patch/test.py
 
-bash playground/test.sh
+bash jl_patch/test.sh
