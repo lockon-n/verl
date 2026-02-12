@@ -25,7 +25,7 @@ ENGINE=${ENGINE:-vllm}
 
 # Paths (customized to your environment)
 DATA_DIR=${DATA_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/data/geo3k"}
-MODEL_DIR=${MODEL_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/models/Qwen/Qwen3-VL-2B-Instruct/"}
+MODEL_DIR=${MODEL_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/models/Qwen/Qwen3-VL-2B-Instruct"}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/checkpoints/verl_qwen3_vl_2b"}
 
 # Parallelism (downsized from the 8B megatron example)
