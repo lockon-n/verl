@@ -22,8 +22,9 @@ Note that our model doesn't have to be `MegatronModule` because we don't share e
 import itertools
 import logging
 import os
+import time
 from functools import partial
-from typing import Iterable
+from typing import Iterable, Optional
 
 import torch
 import torch.distributed
@@ -62,6 +63,14 @@ __all__ = ["MegatronPPOActor"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _format_progress_bar(current: int, total: int, width: int = 24) -> str:
+    if total <= 0:
+        return "[????????????????????????]"
+    current = max(0, min(current, total))
+    filled = int(width * current / total)
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
 class MegatronPPOActor(BasePPOActor):
@@ -753,7 +762,9 @@ class MegatronPPOActor(BasePPOActor):
         return losses_reduced
 
     @GPUMemoryLogger(role="megatron actor", logger=logger)
-    def update_policy(self, dataloader: Iterable[DataProto], enable_mtp: bool = False) -> dict:
+    def update_policy(
+        self, dataloader: Iterable[DataProto], enable_mtp: bool = False, total_iterations: Optional[int] = None
+    ) -> dict:
         """Update the policy with an iterator of DataProto
 
         Args:
@@ -767,7 +778,22 @@ class MegatronPPOActor(BasePPOActor):
             and users have to combine the output in each dp rank manually.
 
         """
+        progress_enabled = os.getenv("VERL_PROGRESS_LOG", "0").lower() in {"1", "true", "yes", "y"}
+        progress_rank0 = (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
+        try:
+            progress_interval = max(1, int(os.getenv("VERL_PROGRESS_BAR_INTERVAL", "1")))
+        except ValueError:
+            progress_interval = 1
+
         metrics = {}
+        update_start_t = time.time()
+        processed = 0
+        if progress_enabled and progress_rank0:
+            print(
+                "[VERL_PROGRESS][actor=megatron][phase=update_policy] "
+                f"start: total_mini_steps={total_iterations if total_iterations is not None else 'unknown'}"
+            )
+
         for data in dataloader:
             if self.config.router_replay.mode in ["R2", "R3"]:
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
@@ -819,6 +845,30 @@ class MegatronPPOActor(BasePPOActor):
                 RouterReplay.clear_global_router_replay_action()
                 RouterReplay.clear_global_indices()
 
+            processed += 1
+            if progress_enabled and progress_rank0 and (
+                processed % progress_interval == 0 or (total_iterations is not None and processed == total_iterations)
+            ):
+                elapsed_s = time.time() - update_start_t
+                if total_iterations is not None and total_iterations > 0:
+                    eta_s = (elapsed_s / processed) * (total_iterations - processed)
+                    bar = _format_progress_bar(processed, total_iterations)
+                    print(
+                        "[VERL_PROGRESS][actor=megatron][phase=update_policy] "
+                        f"{bar} {processed}/{total_iterations} elapsed={elapsed_s:.1f}s eta={eta_s:.1f}s"
+                    )
+                else:
+                    print(
+                        "[VERL_PROGRESS][actor=megatron][phase=update_policy] "
+                        f"processed={processed} elapsed={elapsed_s:.1f}s"
+                    )
+
         self.actor_optimizer.zero_grad()
         get_torch_device().empty_cache()
+        if progress_enabled and progress_rank0:
+            total_elapsed_s = time.time() - update_start_t
+            print(
+                "[VERL_PROGRESS][actor=megatron][phase=update_policy] "
+                f"done: total_elapsed={total_elapsed_s:.1f}s, mini_steps={processed}"
+            )
         return metrics

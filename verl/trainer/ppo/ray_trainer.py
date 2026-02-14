@@ -20,6 +20,8 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import threading
+import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -308,8 +310,65 @@ class RayPPOTrainer:
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        # Verbose progress logging (driver-side). Enable with VERL_PROGRESS_LOG=1.
+        self._progress_log_enabled = os.getenv("VERL_PROGRESS_LOG", "0").lower() in {"1", "true", "yes", "y"}
+        try:
+            self._progress_log_interval = max(1, int(os.getenv("VERL_PROGRESS_LOG_INTERVAL", "1")))
+        except ValueError:
+            self._progress_log_interval = 1
+        try:
+            self._progress_log_meta_preview = max(0, int(os.getenv("VERL_PROGRESS_LOG_META_PREVIEW", "6")))
+        except ValueError:
+            self._progress_log_meta_preview = 6
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+
+    def _should_log_progress(self) -> bool:
+        return self._progress_log_enabled and self.global_steps % self._progress_log_interval == 0
+
+    def _progress_log(self, message: str):
+        if self._should_log_progress():
+            print(f"[VERL_PROGRESS][step={self.global_steps}] {message}")
+
+    def _summarize_dict_keys(self, d: dict[str, Any]) -> str:
+        if not d:
+            return "[]"
+        keys = sorted(d.keys())
+        preview = keys[: self._progress_log_meta_preview]
+        omitted = len(keys) - len(preview)
+        if omitted > 0:
+            return f"{preview} (+{omitted} more)"
+        return str(preview)
+
+    def _start_phase_heartbeat(self, phase: str):
+        if not self._should_log_progress():
+            return None
+        try:
+            interval_s = float(os.getenv("VERL_PROGRESS_HEARTBEAT_SEC", "5"))
+        except ValueError:
+            interval_s = 5.0
+        if interval_s <= 0:
+            return None
+        stop_event = threading.Event()
+        start_t = time.time()
+
+        def _heartbeat():
+            while not stop_event.wait(interval_s):
+                elapsed_s = time.time() - start_t
+                self._progress_log(f"{phase} running: elapsed={elapsed_s:.1f}s")
+
+        t = threading.Thread(target=_heartbeat, daemon=True, name=f"verl-progress-{phase}")
+        t.start()
+        return phase, start_t, stop_event, t
+
+    def _stop_phase_heartbeat(self, heartbeat):
+        if heartbeat is None:
+            return
+        phase, start_t, stop_event, t = heartbeat
+        stop_event.set()
+        t.join(timeout=0.1)
+        elapsed_s = time.time() - start_t
+        self._progress_log(f"{phase} done: elapsed={elapsed_s:.1f}s")
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -555,8 +614,13 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        val_num_batches = len(self.val_dataloader)
+        if self._should_log_progress():
+            self._progress_log(f"validation start: batches={val_num_batches}, merged={merged}")
 
-        for test_data in self.val_dataloader:
+        for batch_idx, test_data in enumerate(self.val_dataloader, start=1):
+            if self._should_log_progress():
+                self._progress_log(f"validation batch {batch_idx}/{val_num_batches}: preparing generation")
             test_batch = DataProto.from_single_dict(test_data)
 
             if "uid" not in test_batch.non_tensor_batch:
@@ -617,6 +681,11 @@ class RayPPOTrainer:
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
             print("validation generation end")
+            if self._should_log_progress():
+                response_shape = tuple(test_output_gen_batch.batch["responses"].shape)
+                self._progress_log(
+                    f"validation batch {batch_idx}/{val_num_batches}: generation done, responses_shape={response_shape}"
+                )
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
@@ -662,6 +731,10 @@ class RayPPOTrainer:
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        if self._should_log_progress():
+            self._progress_log(
+                f"validation end: samples={len(sample_scores)}, extra_keys={self._summarize_dict_keys(reward_extra_infos_dict)}"
+            )
 
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
@@ -1384,23 +1457,39 @@ class RayPPOTrainer:
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )
+                if self._should_log_progress():
+                    prompt_shape = tuple(gen_batch_output.batch["prompts"].shape)
+                    self._progress_log(
+                        "rollout start: "
+                        f"prompts_shape={prompt_shape}, rollout_n={self.config.actor_rollout_ref.rollout.n}, "
+                        f"meta_keys={self._summarize_dict_keys(gen_batch.meta_info)}"
+                    )
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
-                        else:
-                            if curr_step_profile:
-                                self.async_rollout_manager.start_profile()
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                            self.checkpoint_manager.sleep_replicas()
-                            if curr_step_profile:
-                                self.async_rollout_manager.stop_profile()
+                        gen_heartbeat = self._start_phase_heartbeat("rollout gen")
+                        try:
+                            if not self.async_rollout_mode:
+                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
+                            else:
+                                if curr_step_profile:
+                                    self.async_rollout_manager.start_profile()
+                                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                                self.checkpoint_manager.sleep_replicas()
+                                if curr_step_profile:
+                                    self.async_rollout_manager.stop_profile()
+                        finally:
+                            self._stop_phase_heartbeat(gen_heartbeat)
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+                    if self._should_log_progress():
+                        response_shape = tuple(gen_batch_output.batch["responses"].shape)
+                        self._progress_log(
+                            f"rollout done: gen_time={timing_raw.get('gen', 0):.2f}s, responses_shape={response_shape}"
+                        )
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
@@ -1480,6 +1569,11 @@ class RayPPOTrainer:
                             reward_tensor = batch.batch["rm_scores"]
                             reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
                             reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+                    if self._should_log_progress():
+                        self._progress_log(
+                            f"reward done: reward_time={timing_raw.get('reward', 0):.2f}s, "
+                            f"reward_extra_keys={self._summarize_dict_keys(reward_extra_infos_dict)}"
+                        )
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -1527,6 +1621,8 @@ class RayPPOTrainer:
                                 from verl.utils.debug.metrics import calculate_debug_metrics
 
                                 metrics.update(calculate_debug_metrics(batch))
+                        if self._should_log_progress():
+                            self._progress_log(f"old_log_prob done: {timing_raw.get('old_log_prob', 0):.2f}s")
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
@@ -1535,6 +1631,8 @@ class RayPPOTrainer:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                        if self._should_log_progress():
+                            self._progress_log(f"ref logprob done: {timing_raw.get(str(Role.RefPolicy), 0):.2f}s")
 
                     # compute values
                     if self.use_critic:
@@ -1590,6 +1688,8 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+                    if self._should_log_progress():
+                        self._progress_log(f"adv done: {timing_raw.get('adv', 0):.2f}s")
 
                     # update critic
                     if self.use_critic:
@@ -1601,8 +1701,12 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
+                        if self._should_log_progress():
+                            self._progress_log("update_actor start")
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
+                        if self._should_log_progress():
+                            self._progress_log(f"update_actor done: {timing_raw.get('update_actor', 0):.2f}s")
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(
@@ -1629,6 +1733,8 @@ class RayPPOTrainer:
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
                             self.checkpoint_manager.update_weights()
+                        if self._should_log_progress():
+                            self._progress_log(f"update_weights done: {timing_raw.get('update_weights', 0):.2f}s")
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
@@ -1642,10 +1748,14 @@ class RayPPOTrainer:
                 if self.config.trainer.test_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
+                    if self._should_log_progress():
+                        self._progress_log("validation trigger start")
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()
                         if is_last_step:
                             last_val_metrics = val_metrics
+                    if self._should_log_progress():
+                        self._progress_log(f"validation done: {timing_raw.get('testing', 0):.2f}s")
                     metrics.update(val_metrics)
 
                 with marked_timer("stop_profile", timing_raw):
@@ -1689,6 +1799,10 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
+                if self._should_log_progress():
+                    self._progress_log(
+                        f"step done: total={timing_raw.get('step', 0):.2f}s, tokens={metrics.get('perf/total_num_tokens')}"
+                    )
 
                 progress_bar.update(1)
                 self.global_steps += 1

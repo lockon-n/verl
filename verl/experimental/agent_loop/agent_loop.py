@@ -16,6 +16,7 @@ import heapq
 import logging
 import os
 import random
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -51,6 +52,14 @@ from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _format_progress_bar(current: int, total: int, width: int = 24) -> str:
+    if total <= 0:
+        return "[" + "?" * width + "]"
+    clamped_current = max(0, min(current, total))
+    filled = int(width * clamped_current / total)
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
 class AsyncLLMServerManager:
@@ -349,6 +358,7 @@ class AgentLoopWorker:
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        worker_idx: int = 0,
     ):
         """Initialize agent loop manager.
         Args:
@@ -357,6 +367,33 @@ class AgentLoopWorker:
             reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
         """
         self.config = config
+        self.worker_idx = worker_idx
+
+        self._progress_enabled = os.getenv("VERL_PROGRESS_LOG", "0").lower() in {"1", "true", "yes", "y"}
+        try:
+            self._progress_log_interval = max(1, int(os.getenv("VERL_PROGRESS_LOG_INTERVAL", "1")))
+        except ValueError:
+            self._progress_log_interval = 1
+        try:
+            self._rollout_progress_interval = max(
+                1,
+                int(
+                    os.getenv(
+                        "VERL_ROLLOUT_PROGRESS_INTERVAL",
+                        os.getenv("VERL_PROGRESS_BAR_INTERVAL", "1"),
+                    )
+                ),
+            )
+        except ValueError:
+            self._rollout_progress_interval = 1
+        try:
+            self._rollout_progress_bar_width = max(8, int(os.getenv("VERL_ROLLOUT_PROGRESS_BAR_WIDTH", "24")))
+        except ValueError:
+            self._rollout_progress_bar_width = 24
+        try:
+            self._rollout_progress_worker_index = int(os.getenv("VERL_ROLLOUT_PROGRESS_WORKER_INDEX", "0"))
+        except ValueError:
+            self._rollout_progress_worker_index = 0
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
@@ -389,6 +426,45 @@ class AgentLoopWorker:
             trace_config.get("backend"),
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
+        )
+
+    def _should_log_rollout_progress(self, step: int) -> bool:
+        if not self._progress_enabled:
+            return False
+        if step >= 0 and step % self._progress_log_interval != 0:
+            return False
+        if self._rollout_progress_worker_index < 0:
+            return True
+        return self.worker_idx == self._rollout_progress_worker_index
+
+    def _log_rollout_progress(
+        self,
+        *,
+        step: int,
+        validate: bool,
+        completed: int,
+        total: int,
+        start_time: float,
+        force: bool = False,
+    ) -> None:
+        if not self._should_log_rollout_progress(step):
+            return
+        if total <= 0:
+            return
+        if not force and completed < total and completed % self._rollout_progress_interval != 0:
+            return
+        elapsed_s = max(0.0, time.time() - start_time)
+        pct = 100.0 * completed / total
+        bar = _format_progress_bar(completed, total, self._rollout_progress_bar_width)
+        if completed > 0:
+            eta_s = elapsed_s * (total - completed) / completed
+            eta_text = f"{eta_s:.1f}s"
+        else:
+            eta_text = "inf"
+        phase = "val" if validate else "train"
+        print(
+            f"[VERL_PROGRESS][step={step}][rollout_worker={self.worker_idx}][{phase}] "
+            f"{bar} {completed}/{total} ({pct:.1f}%) elapsed={elapsed_s:.1f}s eta={eta_text}"
         )
 
     @tqbridge()
@@ -458,16 +534,56 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        step = int(batch.meta_info.get("global_steps", -1))
+        validate = bool(batch.meta_info.get("validate", False))
+        total_samples = len(batch)
+        start_time = time.time()
+        self._log_rollout_progress(
+            step=step,
+            validate=validate,
+            completed=0,
+            total=total_samples,
+            start_time=start_time,
+            force=True,
+        )
+
+        async def _run_single(sample_idx: int, trace_this_sample: bool, sample_kwargs: dict[str, Any]):
+            sample_output = await self._run_agent_loop(
+                sampling_params,
+                trajectory_info[sample_idx],
+                trace=trace_this_sample,
+                **sample_kwargs,
+            )
+            return sample_idx, sample_output
+
         tasks = []
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            tasks.append(
-                asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+            tasks.append(asyncio.create_task(_run_single(i, trace_this_sample, kwargs)))
+        outputs = [None for _ in range(total_samples)]
+        completed = 0
+
+        try:
+            for done_task in asyncio.as_completed(tasks):
+                sample_idx, sample_output = await done_task
+                outputs[sample_idx] = sample_output
+                completed += 1
+                self._log_rollout_progress(
+                    step=step,
+                    validate=validate,
+                    completed=completed,
+                    total=total_samples,
+                    start_time=start_time,
                 )
-            )
-        outputs = await asyncio.gather(*tasks)
+        except Exception:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            raise
+
+        if any(output is None for output in outputs):
+            raise RuntimeError("Missing rollout outputs after asynchronous generation.")
 
         output = self._postprocess(outputs)
 
@@ -851,6 +967,27 @@ class AgentLoopManager:
         self.config = config
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self._progress_enabled = os.getenv("VERL_PROGRESS_LOG", "0").lower() in {"1", "true", "yes", "y"}
+        try:
+            self._progress_log_interval = max(1, int(os.getenv("VERL_PROGRESS_LOG_INTERVAL", "1")))
+        except ValueError:
+            self._progress_log_interval = 1
+        try:
+            self._rollout_progress_interval = max(
+                1,
+                int(
+                    os.getenv(
+                        "VERL_ROLLOUT_PROGRESS_INTERVAL",
+                        os.getenv("VERL_PROGRESS_BAR_INTERVAL", "1"),
+                    )
+                ),
+            )
+        except ValueError:
+            self._rollout_progress_interval = 1
+        try:
+            self._rollout_progress_bar_width = max(8, int(os.getenv("VERL_ROLLOUT_PROGRESS_BAR_WIDTH", "24")))
+        except ValueError:
+            self._rollout_progress_bar_width = 24
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
@@ -923,8 +1060,45 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
+                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles, i)
             )
+
+    def _should_log_rollout_progress(self, step: int) -> bool:
+        if not self._progress_enabled:
+            return False
+        if step >= 0 and step % self._progress_log_interval != 0:
+            return False
+        return True
+
+    def _log_rollout_progress(
+        self,
+        *,
+        step: int,
+        validate: bool,
+        completed: int,
+        total: int,
+        start_time: float,
+        force: bool = False,
+    ):
+        if not self._should_log_rollout_progress(step):
+            return
+        if total <= 0:
+            return
+        if not force and completed < total and completed % self._rollout_progress_interval != 0:
+            return
+        elapsed_s = max(0.0, time.time() - start_time)
+        pct = 100.0 * completed / total
+        bar = _format_progress_bar(completed, total, self._rollout_progress_bar_width)
+        if completed > 0:
+            eta_s = elapsed_s * (total - completed) / completed
+            eta_text = f"{eta_s:.1f}s"
+        else:
+            eta_text = "inf"
+        phase = "val" if validate else "train"
+        print(
+            f"[VERL_PROGRESS][step={step}][rollout_manager][{phase}] "
+            f"{bar} {completed}/{total} ({pct:.1f}%) elapsed={elapsed_s:.1f}s eta={eta_text}"
+        )
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
@@ -936,13 +1110,51 @@ class AgentLoopManager:
             DataProto: Output batch.
         """
 
+        step = int(prompts.meta_info.get("global_steps", -1))
+        validate = bool(prompts.meta_info.get("validate", False))
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
-        outputs = ray.get(
-            [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
-            ]
+        total_samples = sum(len(chunk) for chunk in chunkes)
+        start_time = time.time()
+        self._log_rollout_progress(
+            step=step,
+            validate=validate,
+            completed=0,
+            total=total_samples,
+            start_time=start_time,
+            force=True,
         )
+
+        output_refs = []
+        ref_to_chunk_idx = {}
+        ref_to_chunk_size = {}
+        for chunk_idx, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True)):
+            output_ref = worker.generate_sequences.remote(chunk)
+            output_refs.append(output_ref)
+            ref_to_chunk_idx[output_ref] = chunk_idx
+            ref_to_chunk_size[output_ref] = len(chunk)
+
+        outputs = [None for _ in chunkes]
+        completed_samples = 0
+        while output_refs:
+            ready_refs, output_refs = ray.wait(output_refs, num_returns=1)
+            ready_ref = ready_refs[0]
+            chunk_idx = ref_to_chunk_idx.pop(ready_ref)
+            chunk_size = ref_to_chunk_size.pop(ready_ref)
+            chunk_output = ray.get(ready_ref)
+            outputs[chunk_idx] = chunk_output
+            completed_samples += chunk_size
+            self._log_rollout_progress(
+                step=step,
+                validate=validate,
+                completed=completed_samples,
+                total=total_samples,
+                start_time=start_time,
+            )
+
+        if any(output is None for output in outputs):
+            raise RuntimeError("Missing agent-loop chunk outputs after rollout generation.")
+
         output = DataProto.concat(outputs)
 
         # calculate performance metrics

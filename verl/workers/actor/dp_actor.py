@@ -19,6 +19,7 @@ Single Process Actor
 
 import logging
 import os
+import time
 
 import torch
 from torch import nn
@@ -44,6 +45,14 @@ __all__ = ["DataParallelPPOActor"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _format_progress_bar(current: int, total: int, width: int = 24) -> str:
+    if total <= 0:
+        return "[????????????????????????]"
+    current = max(0, min(current, total))
+    filled = int(width * current / total)
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -502,6 +511,12 @@ class DataParallelPPOActor(BasePPOActor):
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
+        progress_enabled = os.getenv("VERL_PROGRESS_LOG", "0").lower() in {"1", "true", "yes", "y"}
+        progress_rank0 = (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
+        try:
+            progress_interval = max(1, int(os.getenv("VERL_PROGRESS_BAR_INTERVAL", "1")))
+        except ValueError:
+            progress_interval = 1
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         pad_token_id = data.meta_info.get("pad_token_id", 0)
@@ -539,6 +554,16 @@ class DataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
+        mini_batches_per_epoch = len(mini_batches)
+        total_mini_steps = mini_batches_per_epoch * self.config.ppo_epochs
+        processed_mini_steps = 0
+        update_start_t = time.time()
+        if progress_enabled and progress_rank0:
+            print(
+                "[VERL_PROGRESS][actor=dp][phase=update_policy] "
+                f"start: total_mini_steps={total_mini_steps}, ppo_epochs={self.config.ppo_epochs}, "
+                f"mini_batches_per_epoch={mini_batches_per_epoch}"
+            )
 
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
@@ -546,7 +571,7 @@ class DataParallelPPOActor(BasePPOActor):
             "actor/pg_loss": 0.0,
             "actor/kl_loss": 0.0,
         }
-        for _ in range(self.config.ppo_epochs):
+        for epoch_idx in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
@@ -665,5 +690,25 @@ class DataParallelPPOActor(BasePPOActor):
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
+                processed_mini_steps += 1
+                if progress_enabled and progress_rank0 and (
+                    processed_mini_steps % progress_interval == 0 or processed_mini_steps == total_mini_steps
+                ):
+                    elapsed_s = time.time() - update_start_t
+                    eta_s = (elapsed_s / processed_mini_steps) * (total_mini_steps - processed_mini_steps)
+                    bar = _format_progress_bar(processed_mini_steps, total_mini_steps)
+                    print(
+                        "[VERL_PROGRESS][actor=dp][phase=update_policy] "
+                        f"{bar} {processed_mini_steps}/{total_mini_steps} "
+                        f"(epoch {epoch_idx + 1}/{self.config.ppo_epochs}, "
+                        f"mini {batch_idx + 1}/{mini_batches_per_epoch}) "
+                        f"elapsed={elapsed_s:.1f}s eta={eta_s:.1f}s"
+                    )
         self.actor_optimizer.zero_grad()
+        if progress_enabled and progress_rank0:
+            total_elapsed_s = time.time() - update_start_t
+            print(
+                "[VERL_PROGRESS][actor=dp][phase=update_policy] "
+                f"done: total_elapsed={total_elapsed_s:.1f}s, mini_steps={total_mini_steps}"
+            )
         return metrics

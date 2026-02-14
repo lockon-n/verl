@@ -226,6 +226,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
+        self._progress_log_enabled = os.getenv("VERL_PROGRESS_LOG", "0").lower() in {"1", "true", "yes", "y"}
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
@@ -271,6 +272,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
             self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
+
+    def _progress_log(self, message: str):
+        if self._progress_log_enabled and self.rank == 0:
+            print(f"[VERL_PROGRESS][worker=fsdp][role={self.role}][rank={self.rank}] {message}")
 
     def _build_model_optimizer(
         self,
@@ -892,6 +897,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):
         assert self._is_actor
+        batch_size = int(data.batch.batch_size[0]) if hasattr(data.batch, "batch_size") else -1
+        global_tokens = data.meta_info.get("global_token_num", [])
+        if isinstance(global_tokens, list):
+            global_tokens = int(sum(global_tokens))
+        self._progress_log(
+            f"update_actor start: batch_size={batch_size}, micro_batch_size_per_gpu={self.config.actor.ppo_micro_batch_size_per_gpu}, "
+            f"global_tokens={global_tokens}"
+        )
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
@@ -932,6 +945,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
+        self._progress_log(
+            f"update_actor done: update_policy_s={delta_time:.2f}, lr={metrics.get('actor/lr')}, "
+            f"mfu={metrics.get('perf/mfu/actor')}"
+        )
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
@@ -939,6 +956,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
         assert self._is_rollout
+        prompt_shape = tuple(prompts.batch["prompts"].shape) if "prompts" in prompts.batch else None
+        self._progress_log(f"generate_sequences start: prompts_shape={prompt_shape}")
         prompts = prompts.to(get_device_id())
 
         meta_info = {
@@ -959,6 +978,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         with simple_timer("generate_sequences", timing_generate):
             output = self.rollout.generate_sequences(prompts=prompts)
+        generate_seconds = timing_generate.get("generate_sequences", 0.0)
 
         if self._is_actor:
             loop.run_until_complete(self.trainer_mode())
@@ -979,6 +999,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         output.meta_info["timing"] = timing_generate
         output = output.to("cpu")
+        self._progress_log(f"generate_sequences done: generate_s={generate_seconds:.2f}")
 
         # clear kv cache
         get_torch_device().empty_cache()
