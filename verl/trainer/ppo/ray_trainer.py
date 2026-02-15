@@ -1379,7 +1379,10 @@ class RayPPOTrainer:
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )
                 if self._should_log_progress():
-                    prompt_shape = tuple(gen_batch_output.batch["prompts"].shape)
+                    if gen_batch_output.batch is not None and "prompts" in gen_batch_output.batch.keys():
+                        prompt_shape = tuple(gen_batch_output.batch["prompts"].shape)
+                    else:
+                        prompt_shape = None
                     self._progress_log(
                         "rollout start: "
                         f"prompts_shape={prompt_shape}, rollout_n={self.config.actor_rollout_ref.rollout.n}, "
