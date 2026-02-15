@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import os
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -33,12 +34,34 @@ class BaseTool:
     - `release`: release the tool instance.
     """
 
+    @staticmethod
+    def _parse_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off"}:
+                return False
+        return default
+
     def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
         self.config = config
         self.tool_schema = tool_schema or self.get_openai_tool_schema()
         assert self.tool_schema is not None, "Tool schema is not set!"
         self.name = self.tool_schema.function.name
-        print(json.dumps(self.tool_schema.model_dump(exclude_unset=True, exclude_none=True), indent=2))
+        # Print tool schema only when explicitly enabled to avoid noisy per-sample logs.
+        should_print_schema = self._parse_bool(
+            self.config.get("print_tool_schema") if isinstance(self.config, dict) else None,
+            default=self._parse_bool(os.getenv("VERL_PRINT_TOOL_SCHEMA"), default=False),
+        )
+        if should_print_schema:
+            print(json.dumps(self.tool_schema.model_dump(exclude_unset=True, exclude_none=True), indent=2))
 
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
         return self.tool_schema

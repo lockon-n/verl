@@ -38,6 +38,8 @@ export VERL_ROLLOUT_PROGRESS_INTERVAL="${VERL_ROLLOUT_PROGRESS_INTERVAL:-1}"
 export VERL_ROLLOUT_PROGRESS_WORKER_INDEX="${VERL_ROLLOUT_PROGRESS_WORKER_INDEX:-0}"
 # Heartbeat period for long blocking phases like rollout generation
 export VERL_PROGRESS_HEARTBEAT_SEC="${VERL_PROGRESS_HEARTBEAT_SEC:-5}"
+# Print tool schema JSON on tool initialization (0=off, 1=on)
+export VERL_PRINT_TOOL_SCHEMA="${VERL_PRINT_TOOL_SCHEMA:-0}"
 
 # Rollout backend: sglang or vllm
 ENGINE=${ENGINE:-vllm}
