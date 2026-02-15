@@ -119,7 +119,7 @@ ARGS=(
     # Max prompt tokens
     data.max_prompt_length=2048
     # Max response tokens
-    data.max_response_length=2048
+    data.max_response_length=6144
     # Drop prompts exceeding max_prompt_length
     data.filter_overlong_prompts=True
     # Error out instead of silently truncating
@@ -164,16 +164,16 @@ ARGS=(
     # -------- Dynamic batching / token caps --------
     # Enable dynamic batching for actor update
     actor_rollout_ref.actor.use_dynamic_bsz=True
-    # Max actor tokens per GPU under dynamic batching
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=3072
+    # Max actor tokens per GPU under dynamic batching (must be >= max_prompt_length + max_response_length)
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192
     # Enable dynamic batching for ref logprob
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
     # Max ref logprob tokens per GPU
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=3072
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192
     # Enable dynamic batching for rollout logprob
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     # Max rollout logprob tokens per GPU
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=3072
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192
 
     # -------- Rollout / inference --------
     # Rollout backend name: sglang or vllm
