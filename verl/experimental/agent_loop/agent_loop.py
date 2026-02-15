@@ -272,6 +272,13 @@ class AgentLoopBase(ABC):
         Returns:
             list[int]: Prompt token ids.
         """
+        # Some processors (e.g. Qwen3-VL) expect `images/videos` to be either None or non-empty.
+        # Passing [] may trigger internal indexing errors.
+        if images is not None and len(images) == 0:
+            images = None
+        if videos is not None and len(videos) == 0:
+            videos = None
+
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,
