@@ -40,7 +40,7 @@ export VERL_ROLLOUT_PROGRESS_WORKER_INDEX="${VERL_ROLLOUT_PROGRESS_WORKER_INDEX:
 export VERL_PROGRESS_HEARTBEAT_SEC="${VERL_PROGRESS_HEARTBEAT_SEC:-5}"
 
 # Rollout backend: sglang or vllm
-ENGINE=${ENGINE:-sglang}
+ENGINE=${ENGINE:-vllm}
 
 # ------------------------------
 # Paths
