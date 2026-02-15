@@ -53,7 +53,7 @@ CONFIG_PATH=${CONFIG_PATH:-"$PROJECT_DIR/verl/trainer/config"}
 # Geo3K parquet directory; expects train.parquet/test.parquet
 DATA_DIR=${DATA_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/data/geo3k"}
 # HF model path (local)
-MODEL_DIR=${MODEL_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/models/Qwen/Qwen3-VL-2B-Instruct/"}
+MODEL_DIR=${MODEL_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/models/Qwen/Qwen3-VL-2B-Instruct"}
 # Root directory for checkpoints and extra logs
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/checkpoints/verl_qwen3_vl_2b"}
 # Validation generations dump directory (jsonl)
