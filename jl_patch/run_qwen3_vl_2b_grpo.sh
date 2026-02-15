@@ -46,6 +46,10 @@ ENGINE=${ENGINE:-vllm}
 # ------------------------------
 # Paths
 # ------------------------------
+# Project root directory
+PROJECT_DIR="$(pwd)"
+# Hydra config path
+CONFIG_PATH=${CONFIG_PATH:-"$PROJECT_DIR/verl/trainer/config"}
 # Geo3K parquet directory; expects train.parquet/test.parquet
 DATA_DIR=${DATA_DIR:-"/mnt/hdfs/tiktok_aiic/user/junlongli/data/geo3k"}
 # HF model path (local)
@@ -86,8 +90,8 @@ echo "----------------------------------------"
 
 ARGS=(
     # -------- Base config --------
-    --config-path=config
-    --config-name=ppo_megatron_trainer.yaml
+    --config-path="$CONFIG_PATH"
+    --config-name=ppo_megatron_trainer
 
     # -------- Algorithm --------
     # Use GRPO advantage estimator
@@ -205,7 +209,7 @@ ARGS=(
     # Number of validation samples to log each validation step
     trainer.log_val_generations=20
     # Validation generations dump directory
-    trainer.validation_data_dir="$VAL_GEN_DIR"
+    ++trainer.validation_data_dir="$VAL_GEN_DIR"
     # Training rollout generations dump directory
     trainer.rollout_data_dir="$ROLLOUT_GEN_DIR"
 

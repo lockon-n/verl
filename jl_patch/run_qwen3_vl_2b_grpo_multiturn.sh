@@ -243,7 +243,7 @@ ARGS=(
     # Number of validation samples to log each validation step
     trainer.log_val_generations=20
     # Directory to dump validation generations (jsonl)
-    trainer.validation_data_dir="$VAL_GEN_DIR"
+    ++trainer.validation_data_dir="$VAL_GEN_DIR"
     # Directory to dump training rollout generations (jsonl)
     trainer.rollout_data_dir="$ROLLOUT_GEN_DIR"
 
