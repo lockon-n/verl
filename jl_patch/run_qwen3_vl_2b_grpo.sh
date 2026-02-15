@@ -179,7 +179,7 @@ ARGS=(
 
     # -------- Offload options (currently disabled) --------
     # Keep actor params on GPU
-    actor_rollout_ref.actor.megatron.param_offload=False
+    actor_rollout_ref.actor.megatron.param_offload=True
     # Keep actor optimizer states on GPU
     actor_rollout_ref.actor.megatron.optimizer_offload=False
     # Keep actor grads on GPU
