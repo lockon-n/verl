@@ -74,6 +74,8 @@ class EngineConfig(BaseConfig):
         "infer_micro_batch_size_per_gpu",
         "use_fused_kernels",
         "use_remove_padding",
+        "forward_only",
+        "param_offload",
     }
     # whether to offload param
     param_offload: bool = False
@@ -360,6 +362,7 @@ class TorchtitanEngineConfig(EngineConfig):
     pipeline_parallel_size: int = 1
     context_parallel_size: int = 1
     attn_type: str = "flex"
+    max_seq_len: Optional[int] = None
     strategy: str = "torchtitan"
     seed: int = 42
     full_determinism: bool = False
