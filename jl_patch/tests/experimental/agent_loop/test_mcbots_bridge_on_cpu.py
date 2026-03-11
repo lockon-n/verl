@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+
 import torch
 from transformers import PreTrainedTokenizer
 
@@ -85,7 +87,15 @@ class ToyChatTokenizer(PreTrainedTokenizer):
                 return "".join(parts)
             return str(content)
 
-        rendered = "".join(f"<{msg['role']}>{format_content(msg['content'])}</{msg['role']}>" for msg in messages)
+        def get_message_field(message, field):
+            if isinstance(message, dict):
+                return message[field]
+            return getattr(message, field)
+
+        rendered = "".join(
+            f"<{get_message_field(msg, 'role')}>{format_content(get_message_field(msg, 'content'))}</{get_message_field(msg, 'role')}>"
+            for msg in messages
+        )
         if add_generation_prompt:
             rendered += "<assistant>"
         if tokenize:
@@ -93,49 +103,54 @@ class ToyChatTokenizer(PreTrainedTokenizer):
         return rendered
 
 
-def test_mcbots_bridge_aligns_incremental_messages_on_cpu():
-    tokenizer = ToyChatTokenizer()
-    bridge = McbotsBridge(
-        processing_class=tokenizer,
-        episode_id="episode-1",
-        messages=[
-            {"role": "system", "content": "You are a Minecraft assistant."},
-            {"role": "user", "content": "Collect one wood block."},
-        ],
-        max_prompt_len=512,
-        max_response_len=512,
-        max_model_len=1024,
-    )
+class McbotsBridgeCpuTest(unittest.TestCase):
+    def test_aligns_incremental_messages_on_cpu(self):
+        tokenizer = ToyChatTokenizer()
+        bridge = McbotsBridge(
+            processing_class=tokenizer,
+            episode_id="episode-1",
+            messages=[
+                {"role": "system", "content": "You are a Minecraft assistant."},
+                {"role": "user", "content": "Collect one wood block."},
+            ],
+            max_prompt_len=512,
+            max_response_len=512,
+            max_model_len=1024,
+        )
 
-    prompt_ids = bridge.get_generation_prompt_ids()
-    assert prompt_ids, "generation prompt ids should not be empty"
+        prompt_ids = bridge.get_generation_prompt_ids()
+        self.assertTrue(prompt_ids, "generation prompt ids should not be empty")
 
-    bridge.add_assistant_message("<action><type>exec</type><content>mine tree</content></action>")
-    bridge.add_user_message("Observation: inventory now contains 1 oak log.")
+        bridge.add_assistant_message("<action><type>exec</type><content>mine tree</content></action>")
+        bridge.add_user_message("Observation: inventory now contains 1 oak log.")
 
-    request = bridge.finalize()
+        request = bridge.finalize()
 
-    messages = [msg.model_dump() for msg in request.messages]
-    full_prompt_ids = request._handle_apply_chat_template(
-        tokenizer,
-        messages,
-        multi_modal_data=request.multi_modal_data,
-        tools=None,
-        add_generation_prompt=False,
-        tokenize=True,
-    )
-    assert full_prompt_ids.eq(request.input_ids).all()
+        messages = [msg.model_dump() for msg in request.messages]
+        full_prompt_ids = request._handle_apply_chat_template(
+            tokenizer,
+            messages,
+            multi_modal_data=request.multi_modal_data,
+            tools=None,
+            add_generation_prompt=False,
+            tokenize=True,
+        )
+        self.assertTrue(full_prompt_ids.eq(request.input_ids).all())
 
-    valid_response = request.response_ids[request.response_attention_mask.bool()]
-    trainable_response = request.response_ids[request.response_loss_mask.bool()]
-    masked_response = request.response_ids[request.response_attention_mask.bool() & ~request.response_loss_mask.bool()]
+        valid_response = request.response_ids[request.response_attention_mask.bool()]
+        trainable_response = request.response_ids[request.response_loss_mask.bool()]
+        masked_response = request.response_ids[request.response_attention_mask.bool() & ~request.response_loss_mask.bool()]
 
-    valid_text = tokenizer.decode(valid_response, skip_special_tokens=False)
-    trainable_text = tokenizer.decode(trainable_response, skip_special_tokens=False)
-    masked_text = tokenizer.decode(masked_response, skip_special_tokens=False)
+        valid_text = tokenizer.decode(valid_response, skip_special_tokens=False)
+        trainable_text = tokenizer.decode(trainable_response, skip_special_tokens=False)
+        masked_text = tokenizer.decode(masked_response, skip_special_tokens=False)
 
-    assert "mine tree" in valid_text
-    assert "inventory now contains 1 oak log" in valid_text
-    assert "mine tree" in trainable_text
-    assert "inventory now contains 1 oak log" not in trainable_text
-    assert "inventory now contains 1 oak log" in masked_text
+        self.assertIn("mine tree", valid_text)
+        self.assertIn("inventory now contains 1 oak log", valid_text)
+        self.assertIn("mine tree", trainable_text)
+        self.assertNotIn("inventory now contains 1 oak log", trainable_text)
+        self.assertIn("inventory now contains 1 oak log", masked_text)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -52,7 +52,7 @@ So the shortest path is to wrap that instead of inventing new token bookkeeping.
 - `verl/experimental/agent_loop/agent_loop.py`
 - `verl/experimental/agent_loop/tool_agent_loop.py`
 - `tests/workers/rollout/test_sglang_async_rollout_multimodal_delta.py`
-- `tests/experimental/agent_loop/test_mcbots_bridge_on_cpu.py`
+- `jl_patch/tests/experimental/agent_loop/test_mcbots_bridge_on_cpu.py`
 
 ## Related external reference
 
@@ -87,7 +87,7 @@ What it does:
 
 Minimal CPU-only test:
 
-- file: `tests/experimental/agent_loop/test_mcbots_bridge_on_cpu.py`
+- file: `jl_patch/tests/experimental/agent_loop/test_mcbots_bridge_on_cpu.py`
 
 What it tests:
 
@@ -115,7 +115,7 @@ Already committed and pushed:
 
 - static syntax validation for:
   - `verl/experimental/agent_loop/mcbots_bridge.py`
-  - `tests/experimental/agent_loop/test_mcbots_bridge_on_cpu.py`
+  - `jl_patch/tests/experimental/agent_loop/test_mcbots_bridge_on_cpu.py`
 
 ### Blocked on current machine
 
@@ -202,14 +202,14 @@ If the target machine already has a usable `uv` env:
 
 ```bash
 cd /Users/bytedance/Projects/verl
-UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python -m pytest tests/experimental/agent_loop/test_mcbots_bridge_on_cpu.py -q
+uv run --no-sync python -m unittest jl_patch.tests.experimental.agent_loop.test_mcbots_bridge_on_cpu -v
 ```
 
 If the env still needs syncing and network is available:
 
 ```bash
 cd /Users/bytedance/Projects/verl
-UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/experimental/agent_loop/test_mcbots_bridge_on_cpu.py -q
+uv run python -m unittest jl_patch.tests.experimental.agent_loop.test_mcbots_bridge_on_cpu -v
 ```
 
 ## Things to avoid
