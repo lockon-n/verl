@@ -50,11 +50,6 @@ GPU_REQUIRES = ["liger-kernel", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency
 VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.8.5,<=0.12.0"]
 TRTLLM_REQUIRES = ["tensorrt-llm>=1.2.0rc6"]
-SGLANG_REQUIRES = [
-    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
-    "sglang[srt,openai]==0.5.6",
-    "torch==2.9.1",
-]
 TRL_REQUIRES = ["trl<=0.9.6"]
 MCORE_REQUIRES = ["mbridge"]
 
@@ -64,7 +59,6 @@ extras_require = {
     "gpu": GPU_REQUIRES,
     "math": MATH_REQUIRES,
     "vllm": VLLM_REQUIRES,
-    "sglang": SGLANG_REQUIRES,
     "trl": TRL_REQUIRES,
     "mcore": MCORE_REQUIRES,
     "trtllm": TRTLLM_REQUIRES,
