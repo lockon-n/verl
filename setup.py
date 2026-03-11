@@ -45,7 +45,6 @@ install_requires = [
 ]
 
 TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
-PRIME_REQUIRES = ["pyext"]
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency
@@ -61,7 +60,6 @@ MCORE_REQUIRES = ["mbridge"]
 
 extras_require = {
     "test": TEST_REQUIRES,
-    "prime": PRIME_REQUIRES,
     "geo": GEO_REQUIRES,
     "gpu": GPU_REQUIRES,
     "math": MATH_REQUIRES,
