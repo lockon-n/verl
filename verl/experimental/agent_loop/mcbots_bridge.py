@@ -21,7 +21,9 @@ from verl.tools.schemas import OpenAIFunctionToolCall, ToolResponse
 from verl.workers.rollout.schemas import (
     AsyncRolloutRequest,
     AsyncRolloutRequestStateEnum,
+    BASE_CHAT_HISTORY,
     FinishReasonTypeEnum,
+    Message,
     TokenizationSanityCheckModeEnum,
 )
 
@@ -36,18 +38,25 @@ class McbotsBridge:
         *,
         episode_id: str,
         request_id: Optional[str] = None,
+        multi_modal_keys: Optional[list[str]] = None,
+        multi_modal_data: Optional[dict[str, Any]] = None,
         max_prompt_len: int = 8192,
         max_response_len: int = 8192,
         max_model_len: int = 32768,
-        use_inference_chat_template: bool = True,
+        use_inference_chat_template: bool = False,
         tokenization_sanity_check_mode: TokenizationSanityCheckModeEnum = TokenizationSanityCheckModeEnum.STRICT,
     ) -> None:
         self.processing_class = processing_class
         self.episode_id = episode_id
+        extracted_multi_modal_data = multi_modal_data
+        if extracted_multi_modal_data is None:
+            extracted_multi_modal_data = self._extract_multi_modal_data(messages)
         self.request = AsyncRolloutRequest(
             request_id=request_id or uuid4().hex,
             state=AsyncRolloutRequestStateEnum.PENDING,
             messages=messages,
+            multi_modal_keys=multi_modal_keys,
+            multi_modal_data=extracted_multi_modal_data,
             reward_scores={},
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
@@ -61,8 +70,45 @@ class McbotsBridge:
     def get_generation_prompt_ids(self) -> list[int]:
         return self.request.get_generation_prompt_ids(self.processing_class)
 
-    def add_user_message(self, content: str) -> None:
-        self.request.add_user_message(self.processing_class, content=content)
+    def add_user_message(self, content: str | list[dict[str, Any]] | dict[str, Any]) -> None:
+        if not self._content_has_multi_modal_payload(content):
+            self.request.add_user_message(self.processing_class, content=content)
+            return
+
+        content_list = content if isinstance(content, list) else [content]
+        delta_message = Message(role="user", content=content_list)
+        delta_multi_modal_data = self._extract_multi_modal_data([delta_message.model_dump()])
+
+        self.request.messages.append(delta_message)
+        tools = [tool.model_dump() for tool in self.request.tool_schemas] if self.request.tool_schemas else None
+
+        for key in self.request.multi_modal_keys:
+            if delta_multi_modal_data.get(key):
+                self.request.multi_modal_data[key].extend(delta_multi_modal_data[key])
+
+        content_info = self.request._handle_apply_chat_template(
+            self.processing_class,
+            [*BASE_CHAT_HISTORY, delta_message],
+            multi_modal_data=delta_multi_modal_data,
+            tools=tools,
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+        )
+        content_ids = content_info["input_ids"][..., self.request.base_conv_wo_gen_prompt_end_pos :]
+
+        multi_modal_inputs = content_info.copy()
+        multi_modal_inputs.pop("input_ids", None)
+        multi_modal_inputs.pop("attention_mask", None)
+
+        self.request._remove_generation_prompt_ids_if_present()
+        self.request._update_input_ids(
+            self.processing_class,
+            content_ids,
+            attention_mask=True,
+            loss_mask=False,
+            new_multi_modal_inputs=multi_modal_inputs,
+        )
 
     def add_assistant_message(
         self,
@@ -92,3 +138,32 @@ class McbotsBridge:
             finish_reason_type=finish_reason_type,
         )
         return self.request
+
+    def _extract_multi_modal_data(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(self.processing_class, ProcessorMixin):
+            return {}
+        if not any(self._message_has_multi_modal_payload(message) for message in messages):
+            return {}
+
+        from qwen_vl_utils import process_vision_info
+
+        images, videos = process_vision_info(messages, return_video_metadata=True)
+        multi_modal_data = {}
+        if images:
+            multi_modal_data["image"] = images
+        if videos:
+            multi_modal_data["video"] = videos
+        return multi_modal_data
+
+    @staticmethod
+    def _content_has_multi_modal_payload(content: Any) -> bool:
+        if isinstance(content, dict):
+            return content.get("type") in {"image", "image_url", "video"}
+        if isinstance(content, list):
+            return any(McbotsBridge._content_has_multi_modal_payload(item) for item in content)
+        return False
+
+    @classmethod
+    def _message_has_multi_modal_payload(cls, message: dict[str, Any]) -> bool:
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+        return cls._content_has_multi_modal_payload(content)
