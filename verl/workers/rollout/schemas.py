@@ -33,6 +33,12 @@ BASE_CHAT_HISTORY = [
     {"role": "user", "content": "I am a user."},
 ]
 
+# Keys in processor output that are per-token (same length as input_ids) and must
+# NOT be included in multi_modal_inputs.  Per-image/video tensors like pixel_values
+# and image_grid_thw are safe to concatenate across incremental updates; per-token
+# tensors are not because each update has a different text length.
+_PROCESSOR_PER_TOKEN_KEYS = frozenset({"input_ids", "attention_mask", "mm_token_type_ids", "token_type_ids"})
+
 
 class FinishReasonTypeEnum(str, Enum):
     """The enum for finish reason type."""
@@ -189,13 +195,9 @@ class AsyncRolloutRequest(BaseModel):
                 )
 
             # Process multi_modal_inputs — keep only per-image tensors, drop per-token ones
-            multi_modal_inputs = tokenization_dict_with_prompt.copy()
-            text_ids = multi_modal_inputs.pop("input_ids", None)
-            multi_modal_inputs.pop("attention_mask", None)
-            if text_ids is not None:
-                seq_len = text_ids.shape[-1]
-                for k in [k for k, v in multi_modal_inputs.items() if hasattr(v, "shape") and v.shape[-1] == seq_len]:
-                    multi_modal_inputs.pop(k)
+            multi_modal_inputs = {
+                k: v for k, v in tokenization_dict_with_prompt.items() if k not in _PROCESSOR_PER_TOKEN_KEYS
+            }
             values["multi_modal_inputs"] = multi_modal_inputs
 
             values["position_ids"] = values["prompt_position_ids"] = cls._get_position_ids(
@@ -464,13 +466,7 @@ class AsyncRolloutRequest(BaseModel):
         content_ids = content_info["input_ids"][..., self.base_conv_wo_gen_prompt_end_pos :]
 
         # process multi_modal_inputs — keep only per-image tensors, drop per-token ones
-        multi_modal_inputs = content_info.copy()
-        text_ids = multi_modal_inputs.pop("input_ids", None)
-        multi_modal_inputs.pop("attention_mask", None)
-        if text_ids is not None:
-            seq_len = text_ids.shape[-1]
-            for k in [k for k, v in multi_modal_inputs.items() if hasattr(v, "shape") and v.shape[-1] == seq_len]:
-                multi_modal_inputs.pop(k)
+        multi_modal_inputs = {k: v for k, v in content_info.items() if k not in _PROCESSOR_PER_TOKEN_KEYS}
 
         # chat templates include generation prompt tokens (e.g., "<im_start>assistant\n")
         # So when tool response is added, we need to explicitly remove these tokens.
@@ -593,17 +589,9 @@ class AsyncRolloutRequest(BaseModel):
 
             # We must use dict(full_prompt_info) to convert BatchFeature values to a new dict
             # because np.array() only keeps the keys for BatchFeature.
-            full_prompt_multi_modal_inputs = full_prompt_info.copy()
-            full_text_ids = full_prompt_multi_modal_inputs.pop("input_ids", None)
-            full_prompt_multi_modal_inputs.pop("attention_mask", None)
-            if full_text_ids is not None:
-                full_seq_len = full_text_ids.shape[-1]
-                for k in [
-                    k
-                    for k, v in full_prompt_multi_modal_inputs.items()
-                    if hasattr(v, "shape") and v.shape[-1] == full_seq_len
-                ]:
-                    full_prompt_multi_modal_inputs.pop(k)
+            full_prompt_multi_modal_inputs = {
+                k: v for k, v in full_prompt_info.items() if k not in _PROCESSOR_PER_TOKEN_KEYS
+            }
 
             for multi_modal_inputs_key in self.multi_modal_inputs:
                 if multi_modal_inputs_key in full_prompt_multi_modal_inputs:

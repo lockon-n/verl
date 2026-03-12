@@ -100,14 +100,9 @@ class McbotsBridge:
         )
         content_ids = content_info["input_ids"][..., self.request.base_conv_wo_gen_prompt_end_pos :]
 
-        multi_modal_inputs = content_info.copy()
-        text_len = multi_modal_inputs.pop("input_ids", None)
-        multi_modal_inputs.pop("attention_mask", None)
-        # Strip any per-token tensor (same last dim as input_ids) — e.g. mm_token_type_ids
-        if text_len is not None:
-            seq_len = text_len.shape[-1]
-            for k in [k for k, v in multi_modal_inputs.items() if hasattr(v, "shape") and v.shape[-1] == seq_len]:
-                multi_modal_inputs.pop(k)
+        from verl.workers.rollout.schemas import _PROCESSOR_PER_TOKEN_KEYS
+
+        multi_modal_inputs = {k: v for k, v in content_info.items() if k not in _PROCESSOR_PER_TOKEN_KEYS}
 
         self.request._remove_generation_prompt_ids_if_present()
         self.request._update_input_ids(
