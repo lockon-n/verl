@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from copy import deepcopy
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -48,6 +49,8 @@ class McbotsBridge:
     ) -> None:
         self.processing_class = processing_class
         self.episode_id = episode_id
+        # Deepcopy to prevent processor/chat-template from mutating caller's dicts
+        messages = deepcopy(messages)
         extracted_multi_modal_data = multi_modal_data
         if extracted_multi_modal_data is None:
             extracted_multi_modal_data = self._extract_multi_modal_data(messages)
@@ -98,8 +101,13 @@ class McbotsBridge:
         content_ids = content_info["input_ids"][..., self.request.base_conv_wo_gen_prompt_end_pos :]
 
         multi_modal_inputs = content_info.copy()
-        multi_modal_inputs.pop("input_ids", None)
+        text_len = multi_modal_inputs.pop("input_ids", None)
         multi_modal_inputs.pop("attention_mask", None)
+        # Strip any per-token tensor (same last dim as input_ids) — e.g. mm_token_type_ids
+        if text_len is not None:
+            seq_len = text_len.shape[-1]
+            for k in [k for k, v in multi_modal_inputs.items() if hasattr(v, "shape") and v.shape[-1] == seq_len]:
+                multi_modal_inputs.pop(k)
 
         self.request._remove_generation_prompt_ids_if_present()
         self.request._update_input_ids(
@@ -147,13 +155,40 @@ class McbotsBridge:
 
         from qwen_vl_utils import process_vision_info
 
-        images, videos = process_vision_info(messages, return_video_metadata=True)
+        normalized = self._normalize_image_url_format(messages)
+        images, videos = process_vision_info(normalized, return_video_metadata=True)
         multi_modal_data = {}
         if images:
             multi_modal_data["image"] = images
         if videos:
             multi_modal_data["video"] = videos
         return multi_modal_data
+
+    @staticmethod
+    def _normalize_image_url_format(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Flatten OpenAI nested image_url dicts for qwen_vl_utils compatibility.
+
+        OpenAI format:  {"type": "image_url", "image_url": {"url": "data:..."}}
+        qwen_vl_utils:  {"type": "image_url", "image_url": "data:..."}
+        """
+        out = []
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+            if not isinstance(content, list):
+                out.append(msg)
+                continue
+            new_content = []
+            for part in content:
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "image_url"
+                    and isinstance(part.get("image_url"), dict)
+                ):
+                    new_content.append({"type": "image_url", "image_url": part["image_url"]["url"]})
+                else:
+                    new_content.append(part)
+            out.append({**msg, "content": new_content})
+        return out
 
     @staticmethod
     def _content_has_multi_modal_payload(content: Any) -> bool:
