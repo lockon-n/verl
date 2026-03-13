@@ -46,6 +46,7 @@ class FinishReasonTypeEnum(str, Enum):
     LENGTH = "length"
     STOP = "stop"
     TOOL_CALL = "tool_calls"
+    CONTEXT_RESET = "context_reset"
 
     @classmethod
     def from_str(cls, value: str) -> "FinishReasonTypeEnum":
@@ -55,6 +56,8 @@ class FinishReasonTypeEnum(str, Enum):
             return cls.LENGTH
         elif value == "tool_calls":
             return cls.TOOL_CALL
+        elif value == "context_reset":
+            return cls.CONTEXT_RESET
         else:
             raise ValueError(f"Unsupported finish reason type: {value}")
 
@@ -646,9 +649,7 @@ class AsyncRolloutRequest(BaseModel):
                     diff_details = "\n".join(diff_details_list)
                     logger.warning(f"Found differences:\n{diff_details}")
 
-        if finish_reason_type == FinishReasonTypeEnum.STOP:
-            pass
-        elif finish_reason_type == FinishReasonTypeEnum.LENGTH:
+        if finish_reason_type in (FinishReasonTypeEnum.STOP, FinishReasonTypeEnum.LENGTH, FinishReasonTypeEnum.CONTEXT_RESET):
             pass
         else:
             raise ValueError(f"Unsupported finalize finish reason type: {finish_reason_type}")

@@ -305,8 +305,10 @@ class McbotsBridgeRealVlmTest(unittest.TestCase):
         self.assertTrue(len(prompt_ids_2) > len(prompt_ids_1), "Prompt should grow after adding turns")
 
         # Finalize
-        request = mgr.finalize_episode(episode_id=episode_id)
+        rollouts = mgr.finalize_episode(episode_id=episode_id)
         self.assertFalse(mgr.has_episode(episode_id), "Episode should be cleaned up after finalize")
+        self.assertEqual(len(rollouts), 1, "No context reset → single rollout")
+        request = rollouts[0]
 
         # Verify there are both trainable and masked tokens
         trainable = request.response_ids[request.response_loss_mask.bool()]
