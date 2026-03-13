@@ -21,21 +21,26 @@ Usage::
         generate_fn=rollout_engine.generate,
         processing_class=processor,
     )
-    app = gateway.app
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    base_url = gateway.start(port=0)  # auto-pick free port
+    # mcbots: MCBOTS_BASE_URL=base_url
 
-mcbots just sets ``base_url="http://<host>:8000/v1"`` and talks to it
-like a normal OpenAI API.
+    # ... training loop ...
+    rollouts = gateway.collect_rollouts()
+
+    gateway.shutdown()
 """
 
 from __future__ import annotations
 
 import logging
+import socket
+import threading
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
 import torch
+import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
@@ -122,6 +127,57 @@ class McbotsGateway:
         self._pending_rollouts: dict[str, list[AsyncRolloutRequest]] = {}
         self.app = self._build_app()
 
+    def start(self, host: str = "0.0.0.0", port: int = 0) -> str:
+        """Start the gateway in a background thread and return the base_url.
+
+        Args:
+            host: Bind address. Defaults to all interfaces.
+            port: Port to listen on. ``0`` means pick a free port automatically.
+
+        Returns:
+            The base_url string, e.g. ``"http://hostname:12345/v1"``.
+        """
+        if hasattr(self, "_server_thread") and self._server_thread.is_alive():
+            raise RuntimeError("Gateway is already running")
+
+        if port == 0:
+            port = self._find_free_port()
+
+        config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
+        self._server = uvicorn.Server(config)
+
+        self._server_thread = threading.Thread(target=self._server.run, daemon=True)
+        self._server_thread.start()
+
+        # Wait until uvicorn is fully ready (not just TCP-bound)
+        self._wait_until_ready(self._server)
+
+        hostname = socket.getfqdn() if host == "0.0.0.0" else host
+        self.base_url = f"http://{hostname}:{port}/v1"
+        logger.info(f"McbotsGateway serving at {self.base_url}")
+        return self.base_url
+
+    def shutdown(self) -> None:
+        """Signal the server to stop."""
+        if hasattr(self, "_server"):
+            self._server.should_exit = True
+            self._server_thread.join(timeout=5)
+
+    @staticmethod
+    def _find_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
+
+    @staticmethod
+    def _wait_until_ready(server: uvicorn.Server, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if server.started:
+                return
+            time.sleep(0.05)
+        raise TimeoutError(f"Gateway did not become ready within {timeout}s")
+
     def collect_rollouts(self) -> dict[str, list[AsyncRolloutRequest]]:
         """Drain and return all completed rollouts, keyed by episode_id."""
         rollouts = self._pending_rollouts
@@ -130,6 +186,10 @@ class McbotsGateway:
 
     def _build_app(self) -> FastAPI:
         app = FastAPI()
+
+        @app.get("/v1/health")
+        async def health():
+            return {"status": "ok"}
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResponse:

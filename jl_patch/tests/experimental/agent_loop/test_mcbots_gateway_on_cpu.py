@@ -262,6 +262,38 @@ class McbotsGatewayCpuTest(unittest.TestCase):
         routes = [route.path for route in self.gateway.app.routes]
         self.assertIn("/v1/chat/completions", routes)
 
+    def test_start_and_shutdown(self):
+        base_url = self.gateway.start(host="127.0.0.1")
+        try:
+            self.assertTrue(base_url.startswith("http://"))
+            self.assertTrue(base_url.endswith("/v1"))
+            self.assertEqual(self.gateway.base_url, base_url)
+
+            # Actually call the endpoint over HTTP (bypass any local proxy)
+            import requests
+
+            session = requests.Session()
+            session.trust_env = False
+            resp = session.post(
+                f"{base_url}/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "system", "content": "You are a bot."},
+                        {"role": "user", "content": "Hello."},
+                    ],
+                    "episode_id": "ep-http",
+                    "is_final": True,
+                },
+            )
+            self.assertEqual(resp.status_code, 200, f"Response body: {resp.text}")
+            data = resp.json()
+            self.assertEqual(data["choices"][0]["message"]["content"], "I will mine the block.")
+
+            rollouts = self.gateway.collect_rollouts()
+            self.assertIn("ep-http", rollouts)
+        finally:
+            self.gateway.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()
